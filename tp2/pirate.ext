@@ -1,4 +1,0 @@
-basicConstraints       = critical, CA:FALSE
-keyUsage               = critical, digitalSignature
-extendedKeyUsage       = serverAuth
-subjectAltName         = DNS:www.example.com
