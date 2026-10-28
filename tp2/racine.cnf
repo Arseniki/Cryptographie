@@ -1,0 +1,47 @@
+[ ca ]
+default_ca = CA_racine
+
+[ CA_racine ]
+dir               = ./racine
+database          = $dir/index.txt
+new_certs_dir     = $dir/newcerts
+certificate       = $dir/racine.crt
+private_key       = $dir/private/racine.key
+serial            = $dir/serial
+crlnumber         = $dir/crlnumber
+default_md        = sha384
+default_days      = 3650
+default_crl_days  = 365
+policy            = policy_strict
+crl_extensions    = crl_ext
+
+[ policy_strict ]
+countryName             = match
+stateOrProvinceName     = match
+organizationName        = match
+organizationalUnitName  = optional
+commonName              = supplied
+emailAddress            = optional
+
+[ req ]
+default_bits        = 4096
+distinguished_name  = req_distinguished_name
+string_mask         = utf8only
+default_md          = sha384
+
+[ req_distinguished_name ]
+countryName                     = Country Name (2 letter code)
+stateOrProvinceName             = State or Province Name
+localityName                    = Locality Name
+organizationName                = Organization Name
+commonName                      = Common Name
+
+[ ext_inter ]
+basicConstraints       = critical, CA:TRUE, pathlen:0
+keyUsage               = critical, keyCertSign, cRLSign
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always, issuer
+nameConstraints        = critical, permitted;DNS:tp.local
+
+[ crl_ext ]
+authorityKeyIdentifier = keyid:always
