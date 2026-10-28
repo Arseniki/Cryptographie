@@ -1,0 +1,20 @@
+#tous les fichiers .pyc et le dossier __pycache__ sont ignorés
+*/*.pyc
+*/__pycache__/**
+
+#tous les fichiers notes.txt, notes.md et notes.rst sont ignorés
+/*notes.txt
+/*notes.md
+/*notes.rst
+
+#tous les fichiers .pdf sont ignorés
+/*.pdf
+
+#tous les dosiers .vscode sont ignorés
+*/.vscode/**
+
+#tous les dossiers __pycache__ sont ignorés
+*/__pycache__/**
+
+#tous les dossiers .pytest_cache sont ignorés
+*/.pytest_cache/**
