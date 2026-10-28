@@ -114,17 +114,12 @@ Le fichier `test_coffre.py` vérifie les propriétés fondamentales du système.
 
 ### Lancer les tests
 
-Depuis le dossier du projet :
+Depuis le dossier du projet dans tp1:
 
 ```bash
-pytest -q test_coffre.py
+pytest test test_coffre.py -v
 ```
 
-ou :
-
-```bash
-python -m pytest -q test_coffre.py
-```
 
 ### Résultat attendu
 
