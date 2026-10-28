@@ -590,6 +590,65 @@ chmod +x pki.sh #Pour donner le droit d'exécution
 La limite de notre script ici, est que le script réinitialise index.txt et serial au début. Il repart de zéro à chaque exécution. Ce qui est acceptable en TP, pas en production car on ne détruit jamais l'historique. 
 En production, on peut envisager  ****step-ca, EJBCA, HashiCorp Vault, Microsoft AD CS**
 
+## Questions de réflexion
+### 1. Pourquoi la clé de la racine doit-elle rester hors ligne ?
+
+La clé de la racine est le cœur de la confiance : elle signe les intermédiaires, qui signent les feuilles. Si elle est compromise, un attaquant peut signer n'importe quel certificat (banque, Google…) et monter un homme du milieu à grande échelle (cas DigiNotar, 2011). La garder hors ligne (machine non connectée, HSM, cérémonie de clés auditée) réduit la surface d'attaque : elle n'est utilisée que quelques fois par an.
+
+Si l'intermédiaire est compromis : on le révoque (CRL), on émet un nouvel intermédiaire, et on réémet les feuilles. La racine reste intacte : c'est tout l'intérêt de la hiérarchie.
+
+Si la racine est compromise : c'est catastrophique. Il faut la retirer du magasin de confiance (les éditeurs la marquent « distrusted »), émettre une nouvelle racine, redistribuer, et auditer les journaux CT. Toute la PKI est à refaire.
+
+### 2. À quoi sert pathlen:0 sur l'intermédiaire ?
+
+pathlen:0 interdit à l'intermédiaire de signer d'autres intermédiaires. Il ne peut signer que des feuilles. La chaîne maximale est : racine (niveau 0), intermédiaire (niveau 1), feuille (niveau 2).
+
+Risque si on l'oublie : l'intermédiaire peut créer une sous-hiérarchie (un sous-intermédiaire, qui signe d'autres sous-intermédiaires…). En cas de compromission, l'attaquant peut créer une PKI parallèle difficile à révoquer, et allonger la chaîne pour masquer ses certificats.
+
+### 3. Pourquoi la clé privée du serveur est-elle générée par le serveur et non par l'AC ?
+
+Parce que la clé privée ne doit jamais quitter son détenteur. Si l'AC générait la clé, elle la connaîtrait, et pourrait usurper l'identité du serveur (signer des messages en son nom). Le serveur génère sa clé, envoie une CSR (nom + clé publique, signée par sa clé privée pour prouver la possession), et l'AC signe la clé publique.
+
+
+### 4. Le CN et le SAN contiennent tous deux www.tp.local. Lequel les clients modernes vérifient-ils ?
+
+Le SAN (Subject Alternative Name). Le CN n'est plus utilisé pour la validation du nom depuis longtemps (RFC 6125, navigateurs modernes). Un certificat avec un bon CN mais un SAN absent ou différent est rejeté.
+
+### 5. Limites des CRL, comparaison avec OCSP et certificats courts :
+
+| Mécanisme | Avantages | Limites |
+|---|---|---|
+| CRL | Simple, consultable hors ligne, signée | Peut devenir volumineuse, mise à jour périodique (entre deux publications, un certificat révoqué reste accepté) |
+| OCSP | Réponse en temps réel pour un certificat | Latence, panne du répondeur, vie privée (le répondeur apprend quels sites tu visites) |
+| Certificats courts (90 jours, bientôt 47) | Expiration rapide : limite l'exposition sans dépendre de la révocation | Nécessite une automatisation (ACME), sinon pannes à l'expiration |
+
+### 6. Politique de certification minimale (10 lignes) :
+
+Politique de certification – IGC de laboratoire
+
+- Qui peut demander : les membres du laboratoire, pour des noms sous tp.local uniquement.
+
+- Vérification d'identité : le demandeur prouve qu'il contrôle le nom (fichier .well-known sur le serveur, ou validation par l'administrateur).
+
+- Durées : racine 10 ans, intermédiaire 5 ans, feuilles 90 jours.
+
+- Algorithmes : ECDSA P-384 (racine), P-256 (intermédiaire et feuilles), SHA-384/SHA-256.
+
+- Extensions : CA:TRUE, pathlen:1 (racine), CA:TRUE, pathlen:0 (intermédiaire), CA:FALSE (feuilles), serverAuth ou clientAuth selon l'usage, SAN obligatoire.
+
+- Contraintes : nameConstraints sur l'intermédiaire (DNS:tp.local, email:tp.local).
+
+- Révocation : CRL publiée toutes les 24 h, motif obligatoire (keyCompromise, superseded, etc.).
+
+- Protection des clés : clés privées en 600, racine hors ligne (HSM), jamais dans un dépôt.
+
+- Audit : index.txt conservé, journaux des émissions, revue trimestrielle.
+
+- Migration : prévoir l'agilité (format de certificat versionné, algorithmes post-quantiques).
+
+
+
+
 
 
 
