@@ -1,0 +1,596 @@
+Travail demandé
+## Étape 1 – Préparer les autorités 
+
+Dans cette étape on créé l’arborescence et les deux fichiers de configuration fournis (racine.cnf et inter.cnf).
+
+Explication des lignes du fichier racine.cnf
+| Directive | Rôle |
+|---|---|
+| `dir = ./racine` | Répertoire de travail de l'AC racine |
+| `database`, `new_certs_dir` | Base et stockage des certificats émis |
+| `serial`, `crlnumber` | Compteurs uniques |
+| `certificate`, `private_key` | Certificat et clé privée de l'AC |
+| `default_md = sha384` | SHA-384 (adapté à P-384) |
+| `default_crl_days = 30` | CRL valide 30 jours |
+| `policy = politique_souple` | Politique des champs du sujet |
+| `copy_extensions = none` | Les extensions de la CSR ne sont pas copiées : seules celles de `ext_inter` s'appliquent |
+| `politique_souple : countryName = optional` | Champ facultatif |
+| `politique_souple : organizationName = optional` | Champ facultatif |
+| `politique_souple : commonName = supplied` | Champ fourni par le demandeur |
+| `ext_inter : basicConstraints critical, CA:TRUE, pathlen:0` | L'intermédiaire est une AC, ne signe pas d'autre intermédiaire |
+| `ext_inter : keyUsage critical, keyCertSign, cRLSign` | Signe certificats et CRL |
+| `ext_inter : nameConstraints` | Autorise `DNS:.tp.local`, `DNS:tp.local`, `email:tp.local` |
+| `ext_inter : subjectKeyIdentifier, authorityKeyIdentifier` | Identifiants de clé |
+
+On note ici que : copy_extensions = none sur la racine signifie que les extensions demandées dans la CSR de l'intermédiaire ne sont pas copiées. Seules les extensions de ext_inter s'appliquent. C'est la racine qui décide des extensions de l'intermédiaire.
+
+
+| Directive | Rôle |
+|---|---|
+| `default_md = sha256` | SHA-256 (adapté à P-256) |
+| `default_crl_days = 7` | CRL valide 7 jours |
+| `copy_extensions = copy` | Les extensions de la CSR sont copiées dans le certificat (dont le SAN du serveur) |
+| `ext_server : CA:FALSE` | Le serveur n'est pas une AC |
+| `ext_server : extendedKeyUsage serverAuth` | Usage serveur TLS |
+| `ext_server : subjectKeyIdentifier, authorityKeyIdentifier` | Identifiants de clé |
+| `ext_client : CA:FALSE` | Le client n'est pas une AC |
+| `ext_client : extendedKeyUsage clientAuth` | Usage client TLS |
+| `ext_client : subjectAltName email:alice@tp.local` | SAN imposé pour le client |
+
+
+il faut noter ici que : copy_extensions = copy sur l'intermédiaire signifie que le SAN du serveur (DNS:www.tp.local, DNS:tp.local) est repris de la CSR. C'est pour cela que la CSR du serveur doit contenir le SAN (contrairement à ce qu'on avait fait avec openssl ca qui forçait le SAN).
+
+## Étape 2 – AC racine (20 min).
+# 2.1 Clé privée P-384
+```bash
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384  -out racine/racine.key
+chmod 600 racine/racine.key
+```
+
+| Option | Rôle |
+|---|---|
+| `genpkey -algorithm EC` | Clé courbe elliptique |
+| `-pkeyopt ec_paramgen_curve:P-384` | Courbe P-384 (~192 bits) |
+| `-out racine/racine.key` | Clé privée à la racine du dossier de l'AC (annexe B) |
+| `chmod 600` | Lisible seulement par le propriétaire |
+
+Nous avons utilisé P-384 parce que la racine vit 10 ans et signe des intermédiaires. Elle a besoin d'une marge de sécurité plus grande que les feuilles (P-256, 90 jours). Ce qui concorde bien avec la recommandation NIST du cours chapitre 4.
+
+## 2.2 Certificat auto-signé
+
+```bash
+openssl req -x509 -new -key racine/racine.key -sha384 -days 3650 \
+  -subj "/C=BF/O=Universite TP/CN=Racine TP" \
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:1" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash" \
+  -out racine/racine.crt
+```
+
+| Option | Rôle |
+|---|---|
+| `req -x509` | Certificat auto-signé (pas de CSR) |
+| `-sha384` | Signature SHA-384 (adapté à P-384) |
+| `-days 3650` | 10 ans |
+| `-subj` | Sujet (C, O, CN) — `politique_souple` n'exige ni ST ni O |
+| `-addext basicConstraints` | AC racine, `pathlen:1` : autorise une AC intermédiaire (annexe B) |
+| `-addext keyUsage` | Signe certificats et CRL |
+| `-addext subjectKeyIdentifier` | Identifiant de clé |
+
+## 2.3 Vérifier
+
+```bash
+openssl x509 -in racine/racine.crt -noout -subject -issuer -dates 
+```
+#### Résultats relévés :
+
+| Paramètre | Valeur |
+|---|---|
+| Émetteur (`issuer`) | `C=BF, O=Universite TP, CN=Racine TP` |
+| Sujet (`subject`) | `C=BF, O=Universite TP, CN=Racine TP` |
+| Validité | Du 28 octobre 2026 à 14:41:59 GMT au 25 octobre 2036 à 14:41:59 GMT (10 ans, selon `-days 3650`). |
+| Algorithme de clé | EC, courbe P-384, d'après la commande de génération de clé. |
+| Extensions critiques | `Basic Constraints: CA:TRUE, pathlen:1` ; `Key Usage: Certificate Sign, CRL Sign`. |
+
+L'émetteur et le sujet sont identiques parce que la racine est auto-signée. Sa confiance vient de sa présence dans le magasin de confiance du client, pas de sa signature. C'est le point d'ancrage de la chaîne, ce que explique le chapitre 5 du cours.
+
+## Étape 3 – AC intermédiaire (P-256, 5 ans)
+### 3.1 Clé privée et CSR
+```bash
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+  -out inter/inter.key
+chmod 600 inter/inter.key
+
+openssl req -new -key inter/inter.key -sha256 \
+  -subj "/C=BF/O=Universite TP/CN=Intermediaire TP" \
+  -out inter/inter.csr
+```
+
+| Option | Rôle |
+|---|---|
+| `genpkey ... P-256` | Clé de l'intermédiaire (128 bits, 5 ans) |
+| `req -new` | CSR (demande de certificat) |
+| `-subj` | Sujet (C, O, CN) |
+| `-sha256` | Signature de la CSR (preuve de possession) |
+
+Ici conformément à la règle d'ingénieur recommandée, la clé privée ne quitte jamais l'intermédiaire. La CSR contient le nom et la clé publique, signée par la clé privée (preuve de possession). L'AC ne voit jamais la clé privée.
+
+#### 3.2 La racine signe l'intermédiaire
+
+```bash
+openssl ca -batch -config racine.cnf -extensions ext_inter -days 1825 \
+  -in inter/inter.csr -out inter/inter.crt
+```
+
+| Option | Rôle |
+|---|---|
+| `ca -config racine.cnf` | C'est la racine qui signe |
+| `-batch` | Mode non interactif |
+| `-extensions ext_inter` | `CA:TRUE`, `pathlen:0`, `nameConstraints` |
+| `-days 1825` | 5 ans |
+
+
+La commande vérifie la signature de la CSR, vérifie la politique (politique_souple : commonName obligatoire), attribue un numéro de série (depuis 1000), applique ext_inter, signe, met à jour racine/index.txt (statut V pour valide).
+
+On note ici que copy_extensions = none sur la racine veut dire que les extensions de la CSR ne sont pas copiées. Seules celles de ext_inter s'appliquent.
+
+#### 3.3 Vérifier
+
+```bash
+openssl x509 -in inter/inter.crt -noout -subject -issuer
+openssl x509 -in inter/inter.crt -noout -text | grep -A4 "Basic Constraints\|Key Usage\|Name Constraints"
+openssl verify -CAfile racine/racine.crt inter/inter.crt
+```
+
+La sortie attendue est :
+
+```text
+Sujet (subject) : C=BF, O=Universite TP, CN=Intermediaire TP
+Émetteur (issuer) : C=BF, O=Universite TP, CN=Racine TP
+
+Extensions :
+  Basic Constraints (critique) :
+    CA:TRUE, pathlen:0
+  Key Usage (critique) :
+    Certificate Sign, CRL Sign
+  Name Constraints (critique) :
+    Permitted :
+      DNS:.tp.local
+      DNS:tp.local
+      email:tp.local
+
+Résultat de vérification : inter/inter.crt: OK
+```
+On voit bien evidement la présence des contraintes de nom,et pathlen à travers les paramètres nameConstraints et pathlen.
+
+## Étape 4 – Certificats de serveur et de client
+
+### 4.1 Certificat serveur
+
+```bash
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out serveur.key
+chmod 600 serveur.key
+
+openssl req -new -key serveur.key -sha256 \
+  -subj "/C=BF/O=Universite TP/CN=www.tp.local" \
+  -addext "subjectAltName=DNS:www.tp.local,DNS:tp.local" \
+  -out serveur.csr
+
+openssl ca -batch -config inter.cnf -extensions ext_server -days 90 \
+  -in serveur.csr -out serveur.crt
+```
+```text
+Le résultat de la commande donne : 
+Using configuration from inter.cnf
+Check that the request matches the signature
+Signature ok
+The Subject's Distinguished Name is as follows
+countryName           :PRINTABLE:'BF'
+organizationName      :ASN.1 12:'Universite TP'
+commonName            :ASN.1 12:'www.tp.local'
+Certificate is to be certified until Jan 26 15:26:22 2027 GMT (90 days)
+
+Write out database with 1 new entries
+Database updated
+```
+
+Option	Rôle
+genpkey ... P-256	Clé du serveur
+req -new ... -addext subjectAltName	CSR avec SAN (obligatoire pour TLS)
+ca -config inter.cnf	C'est l'intermédiaire qui signe
+-extensions ext_server	CA:FALSE, serverAuth (note : ext_server, pas ext_serveur)
+
+Comme le précédent, ici copy_extensions = copy sur l'intermédiaire signifie que le SAN de la CSR est copié dans le certificat. C'est la CSR qui porte le SAN, l'AC le reprend. Le nom de la section est ext_server d'après l'annexe B.
+
+Le SAN est obligatoire : les navigateurs vérifient le SAN, pas le CN d'après notre cours au niveau du chapitre 5.
+
+   
+### 4.2 Certificat client
+
+```bash
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out alice.key
+chmod 600 alice.key
+
+openssl req -new -key alice.key -sha256 \
+  -subj "/C=BF/O=Universite TP/CN=alice@tp.local" \
+  -out alice.csr
+
+openssl ca -batch -config inter.cnf -extensions ext_client -days 90 \
+  -in alice.csr -out alice.crt
+```
+La sortie donne : 
+```text
+Using configuration from inter.cnf
+Check that the request matches the signature
+Signature ok
+The Subject's Distinguished Name is as follows
+countryName           :PRINTABLE:'BF'
+organizationName      :ASN.1 12:'Universite TP'
+commonName            :ASN.1 12:'alice@tp.local'
+Certificate is to be certified until Jan 26 15:34:00 2027 GMT (90 days)
+
+Write out database with 1 new entries
+Database updated
+```
+En observant on voit que :
+
+```text
+ext_client applique CA:FALSE, clientAuth, et impose subjectAltName = email:alice@tp.local. 
+
+Le SAN du client vient de ext_client, pas de la CSR. 
+
+Alice ne peut pas servir de serveur, et inversement.
+```
+
+## 4.3 Vérifier
+Pour le serveur :
+
+```bash
+openssl x509 -in serveur.crt -noout -subject -issuer
+openssl x509 -in serveur.crt -noout -text | grep -A3 "Basic Constraints\|Extended Key Usage\|Subject Alternative"
+```
+Le résultat donne :
+```text
+subject=C=BF, O=Universite TP, CN=www.tp.local
+issuer=C=BF, O=Universite TP, CN=Intermediaire TP
+            X509v3 Basic Constraints: critical
+                CA:FALSE
+            X509v3 Key Usage: critical
+                Digital Signature
+            X509v3 Extended Key Usage:
+                TLS Web Server Authentication
+            X509v3 Subject Key Identifier:
+                91:F9:11:F9:A2:4B:39:3D:48:0C:F1:3D:27:C8:3E:74:FE:FB:63:8C
+--
+            X509v3 Subject Alternative Name: 
+                DNS:www.tp.local, DNS:tp.local
+    Signature Algorithm: ecdsa-with-SHA256
+    Signature Value:
+```
+
+
+
+Pour le client : 
+
+```bash
+openssl x509 -in alice.crt -noout -subject -issuer
+openssl x509 -in alice.crt -noout -text | grep -A3 "Extended Key Usage\|Subject Alternative"
+```
+Le résultat donne :
+```text
+subject=C=BF, O=Universite TP, CN=alice@tp.local
+issuer=C=BF, O=Universite TP, CN=Intermediaire TP
+            X509v3 Extended Key Usage: 
+                TLS Web Client Authentication
+            X509v3 Subject Alternative Name: 
+                email:alice@tp.local
+            X509v3 Subject Key Identifier: 
+                39:13:17:57:6C:FA:01:8E:A6:DF:D2:2D:DA:63:7F:1A:F6:DC:13:69
+```
+
+## Étape 5 – Valider la chaîne
+
+Pour l'étape 5, afin de pouvoir bien repondre aux question, on a lu attentivement le sujet et on constate que :
+
+L'annexe B impose ***pathlen:0*** sur la racine, ce qui interdit une chaîne à 3 niveaux (racine → intermédiaire → feuille). 
+
+Pour construire la hiérarchie demandée, il faut ***pathlen:1*** sur la racine : elle peut signer un intermédiaire, qui signe les feuilles. C'est la limitation de profondeur d'après le cours chapitre 5 : pathlen compte le nombre d'intermédiaires autorisés sous le certificat, pas le nombre total de niveaux.
+
+pathlen:0 sur la racine : racine → feuille (2 niveaux) ;
+
+pathlen:1 sur la racine : racine → intermédiaire → feuille (3 niveaux) ;
+
+pathlen:0 sur l'intermédiaire : intermédiaire → feuille (pas de sous-intermédiaire).
+
+Après recherche on retient pathlen:0 sur une racine qui signe un intermédiaire casse la validation. Le TP demande une hiérarchie à 3 niveaux, donc pathlen:1 est obligatoire sur la racine.
+
+### 5.1 Chaîne complète
+
+```bash
+openssl verify -CAfile racine/racine.crt -untrusted inter/inter.crt serveur.crt 
+``` 
+Le resultat de la sortie donne :
+```text
+    serveur.crt: OK
+ce qui veut signifie que 
+Chaîne reconstruite : serveur (signé par inter), 
+     inter (signé par racine),
+     racine (racine de confiance).
+```
+
+### 5.2 Nom d'hôte
+
+```bash
+openssl verify -CAfile racine/racine.crt -untrusted inter/inter.crt \
+  -verify_hostname www.tp.local serveur.crt
+# attendu : OK
+
+openssl verify -CAfile racine/racine.crt -untrusted inter/inter.crt \
+  -verify_hostname autre.example serveur.crt
+# attendu : hostname mismatch
+
+``` 
+La sortie des deux commandes donne : 
+```text
+serveur.crt: OK
+C=BF, O=Universite TP, CN=www.tp.local
+error 62 at 0 depth lookup: hostname mismatch
+```
+
+Le SAN contient DNS:www.tp.local, DNS:tp.local. autre.example ne correspond à aucun SAN : hostname mismatch. C'est ce qui empêche un pirate de présenter son certificat valide pour pirate.com quand tu vas sur banque.com.
+
+5.3 Usages
+
+```bash 
+openssl verify -CAfile racine/racine.crt -untrusted inter/inter.crt \
+  -purpose sslserver serveur.crt
+# attendu : OK
+
+openssl verify -CAfile racine/racine.crt -untrusted inter/inter.crt \
+  -purpose sslclient alice.crt
+# attendu : OK
+
+openssl verify -CAfile racine/racine.crt -untrusted inter/inter.crt \
+  -purpose sslclient serveur.crt
+# attendu : unsupported or unsuitable certificate purpose
+```
+La sortie confirme exactement ce qui est attendu :
+```text
+serveur.crt: OK
+alice.crt: OK
+C=BF, O=Universite TP, CN=www.tp.local
+error 26 at 0 depth lookup: unsuitable certificate purpose
+error serveur.crt: verification failed
+``` 
+On voit bien ici que ***serveur.crt*** a ***extendedKeyUsage = serverAuth***. Il ne peut donc pas servir de client. L'option ***-purpose sslclient*** le rejette d'après le cours au chapitre 5.
+
+## 5.4 Test du nameConstraints
+```bash
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out pirate.key
+chmod 600 pirate.key
+openssl req -new -key pirate.key -sha256 \
+  -subj "/C=BF/O=Universite TP/CN=www.example.com" \
+  -addext "subjectAltName=DNS:www.example.com" \
+  -out pirate.csr
+
+openssl ca -batch -config inter.cnf -extensions ext_server -days 90 \
+  -in pirate.csr -out pirate.crt
+
+openssl verify -CAfile racine/racine.crt -untrusted inter/inter.crt pirate.crt 
+```
+La sortie donne : 
+```text
+Using configuration from inter.cnf
+Check that the request matches the signature
+Signature ok
+The Subject's Distinguished Name is as follows
+countryName           :PRINTABLE:'BF'
+organizationName      :ASN.1 12:'Universite TP'
+commonName            :ASN.1 12:'www.example.com'
+Certificate is to be certified until Jan 26 16:21:55 2027 GMT (90 days)
+
+Write out database with 1 new entries
+Database updated
+C=BF, O=Universite TP, CN=www.example.com
+error 47 at 0 depth lookup: permitted subtree violation
+error pirate.crt: verification failed
+```
+
+On note ici qu'avec ***copy_extensions = copy***, le SAN de la CSR (www.example.com) est copié dans pirate.crt. Pas besoin de pirate.ext ni de openssl x509 -req : openssl ca avec ***ext_server*** et ***copy_extensions = copy*** suffit.
+
+## Étape 6 – Révocation et CRL
+### 6.1 Révoquer Alice
+
+```bash
+openssl ca -config inter.cnf -revoke alice.crt -crl_reason keyCompromise
+```
+La sortie de la commande donne : 
+```text
+    Using configuration from inter.cnf
+    Revoking Certificate 2001.
+    Database updated
+```
+
+Option	Rôle
+ca -config inter.cnf	AC intermédiaire (émettrice d'Alice)
+-revoke alice.crt	Révoque le certificat
+-crl_reason keyCompromise	Motif : clé compromise 
+
+Quand on vérifie dans inter/index.txt, la ligne d'Alice commence par R.
+
+```text
+V       270126160338Z           2000    unknown /C=BF/O=Universite TP/CN=www.tp.local
+R       270126160338Z   261028162604Z,keyCompromise     2001    unknown /C=BF/O=Universite TP/CN=alice@tp.local
+V       270126162155Z           2002    unknown /C=BF/O=Universite TP/CN=www.example.com
+
+Ici V signifie valide, R:revoqué.
+```
+
+### 6.2 Générer les CRL
+
+```bash
+openssl ca -config inter.cnf -gencrl -out inter/crl/inter.crl
+openssl ca -config racine.cnf -gencrl -out racine/crl/racine.crl
+```
+
+On a la sortie de succès :
+```text
+Using configuration from inter.cnf
+Using configuration from racine.cnf
+```
+
+L'option ***-gencrl*** génère la liste de révocation, signée par l'AC. La CRL de l'intermédiaire liste les feuilles révoquées (Alice). La CRL de la racine liste les intermédiaires révoqués.
+
+On vérifie à travers cette  : 
+```bash
+openssl crl -in inter/crl/inter.crl -noout -text
+```
+
+qui donne : 
+```text
+Certificate Revocation List (CRL):
+    Version 2 (0x1)
+    Signature Algorithm: ecdsa-with-SHA256
+    Issuer: C=BF, O=Universite TP, CN=Intermediaire TP
+    Last Update: Oct 28 16:32:52 2026 GMT
+    Next Update: Nov  4 16:32:52 2026 GMT
+    CRL extensions:
+        X509v3 CRL Number: 
+            8192
+Revoked Certificates:
+    Serial Number: 2001
+        Revocation Date: Oct 28 16:26:04 2026 GMT
+        CRL entry extensions:
+            X509v3 CRL Reason Code: 
+                Key Compromise
+    Signature Algorithm: ecdsa-with-SHA256
+    Signature Value:
+        30:44:02:20:63:70:5c:cc:2d:1e:f9:a2:b4:b5:74:c4:4c:df:
+        74:62:c9:ef:16:54:f7:f1:66:0b:77:d2:51:e3:34:49:a1:c3:
+        02:20:6c:93:14:69:0d:99:3b:1a:2e:19:fe:d7:4c:0f:95:7f:
+        e2:21:a9:a8:74:09:89:79:93:f7:a8:04:70:5c:ca:b5
+```
+
+### 6.3 Concaténer les CRL
+```bash
+cat inter/crl/inter.crl racine/crl/racine.crl > crls.pem
+grep -c "BEGIN X509 CRL" crls.pem
+# attendu : 2
+``` 
+On obtient exactement 2.
+
+Alors un client a besoin des deux CRL pour vérifier toute la chaîne (feuille et intermédiaire).
+
+## 6.4 Vérifier la révocation
+
+```bash
+openssl verify -CAfile racine/racine.crt -untrusted inter/inter.crt alice.crt
+# attendu : alice.crt: OK
+
+openssl verify -crl_check_all -CRLfile crls.pem \
+  -CAfile racine/racine.crt -untrusted inter/inter.crt alice.crt
+# attendu : certificate revoked
+
+openssl verify -crl_check_all -CRLfile crls.pem \
+  -CAfile racine/racine.crt -untrusted inter/inter.crt serveur.crt
+# attendu : serveur.crt: OK
+
+```
+
+La sortie de ces commandes donne : 
+
+```text
+    alice.crt: OK
+    C=BF, O=Universite TP, CN=alice@tp.local
+    error 23 at 0 depth lookup: certificate revoked
+    serveur.crt: OK
+``` 
+
+***-crl_check_all*** vérifie la CRL à chaque niveau de la chaîne. Sans ***-crl_check_all***, OpenSSL ne vérifie que la CRL du premier niveau. La révocation est périodique : entre deux publications, un certificat révoqué reste accepté. D'où la tendance aux certificats courts (90 jours, bientôt 47).
+
+## Étape 7 – Automatiser avec pki.sh
+
+### 7.1 Création du script
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+[ -f racine.cnf ] || { echo "ERREUR : racine.cnf manquant"; exit 1; }
+[ -f inter.cnf ]  || { echo "ERREUR : inter.cnf manquant"; exit 1; }
+
+echo "==> Preparation de l'arborescence"
+mkdir -p racine/{certs,crl,newcerts} inter/{certs,crl,newcerts}
+touch racine/index.txt inter/index.txt
+echo 1000 > racine/serial; echo 1000 > racine/crlnumber
+echo 2000 > inter/serial;  echo 2000 > inter/crlnumber
+
+echo "==> AC racine (P-384)"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out racine/racine.key
+chmod 600 racine/racine.key
+openssl req -x509 -new -key racine/racine.key -sha384 -days 3650 \
+  -subj "/C=BF/O=Universite TP/CN=Racine TP" \
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash" -out racine/racine.crt
+
+echo "==> AC intermediaire (P-256)"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out inter/inter.key
+chmod 600 inter/inter.key
+openssl req -new -key inter/inter.key -sha256 \
+  -subj "/C=BF/O=Universite TP/CN=Intermediaire TP" -out inter/inter.csr
+openssl ca -batch -config racine.cnf -extensions ext_inter -days 1825 \
+  -in inter/inter.csr -out inter/inter.crt
+
+echo "==> Certificat serveur (www.tp.local)"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out serveur.key
+chmod 600 serveur.key
+openssl req -new -key serveur.key -sha256 \
+  -subj "/C=BF/O=Universite TP/CN=www.tp.local" \
+  -addext "subjectAltName=DNS:www.tp.local,DNS:tp.local" -out serveur.csr
+openssl ca -batch -config inter.cnf -extensions ext_server -days 90 \
+  -in serveur.csr -out serveur.crt
+
+echo "==> Certificat client (alice@tp.local)"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out alice.key
+chmod 600 alice.key
+openssl req -new -key alice.key -sha256 \
+  -subj "/C=BF/O=Universite TP/CN=alice@tp.local" -out alice.csr
+openssl ca -batch -config inter.cnf -extensions ext_client -days 90 \
+  -in alice.csr -out alice.crt
+
+echo "==> Verification de la chaine"
+openssl verify -CAfile racine/racine.crt -untrusted inter/inter.crt serveur.crt
+openssl verify -CAfile racine/racine.crt -untrusted inter/inter.crt alice.crt
+echo "==> IGC construite avec succes."
+```
+
+## 7.2 Explication des flags de : set -euo pipefail
+
+| Option | Effet |
+|---|---|
+| `-e` | Stop à la première commande qui échoue |
+| `-u` | Erreur si une variable non définie est utilisée |
+| `-o pipefail` | Un pipe échoue si n'importe laquelle de ses commandes échoue |
+
+On note ici que sans ***-e*** : 
+
+on a un échec silencieux produit des certificats corrompus. 
+
+Avec ***-e***, le script s'arrête immédiatement. 
+
+## 7.3 Exécuter et vérifier
+
+```bash
+chmod +x pki.sh #Pour donner le droit d'exécution
+
+./pki.sh #Pour exécuter
+``` 
+
+La limite de notre script ici, est que le script réinitialise index.txt et serial au début. Il repart de zéro à chaque exécution. Ce qui est acceptable en TP, pas en production car on ne détruit jamais l'historique. 
+En production, on peut envisager  ****step-ca, EJBCA, HashiCorp Vault, Microsoft AD CS**
+
+
+
+
+
